@@ -90,7 +90,7 @@ KEEP_COLS = ["idx", "entity_id", "cty", "name_key", "addr_key", "name_raw", "nam
              "pc", "pc3", "hn", "dig_key", "legal", "initials", "first_tok"]
 
 
-def _keys(nd, fix, batch=1_000_000):
+def _keys(nd, fix, batch=750_000):
     parts = []
     for off in range(0, nd.height, batch):
         b = nd.slice(off, batch)
@@ -161,22 +161,26 @@ def _rec_stats(kw, k_all, n):
 
 
 class Corpus3:
-    def __init__(self, s1_raw, tgt_raw, max_df=10_000, budget=3_000, spell=True, log=print):
-        s1, tg = normalize(s1_raw), normalize(tgt_raw)
-        fix = build_corrections([s1, tg]) if spell else None
+    def __init__(self, s1_raw, tgt_raw, max_df=10_000, budget=3_000, spell=True, log=print, batch=750_000):
+        s1, tg = normalize(s1_raw, batch), normalize(tgt_raw, batch)
+        fix = build_corrections([s1, tg], batch=batch) if spell else None
         log(f"  spelling corrections: {0 if fix is None else fix.height:,}")
-        k1, kt = _keys(s1, fix), _keys(tg, fix)
+        k1, kt = _keys(s1, fix, batch), _keys(tg, fix, batch)
         self.s1, self.tg = s1.select(KEEP_COLS), tg.select(KEEP_COLS)
         del s1, tg
         dft = kt.group_by("key").agg(pl.len().cast(pl.UInt32).alias("dft"))
         nt = self.tg.height
 
-        def weigh(k):
-            return (k.join(dft, on="key", how="left").with_columns(pl.col("dft").fill_null(0))
+        def weigh(k, wbatch=20_000_000):
+            outs = []
+            for o in range(0, k.height, wbatch):   # batched: this join otherwise doubles peak memory
+                outs.append(
+                    k.slice(o, wbatch).join(dft, on="key", how="left").with_columns(pl.col("dft").fill_null(0))
                     .filter(pl.col("dft") <= max_df)
                     .with_columns((((nt + 1) / (pl.col("dft") + 1)).log()
                                    * pl.col("typ").replace_strict(TYP_W, return_dtype=pl.Float64))
                                   .cast(pl.Float32).alias("w")))
+            return pl.concat(outs, rechunk=True) if len(outs) > 1 else outs[0]
 
         k1w, ktw = weigh(k1), weigh(kt)
         self.s1_stats = _rec_stats(k1w, k1, self.s1.height)
