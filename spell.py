@@ -17,7 +17,7 @@ labels and no external data.
 import polars as pl
 
 
-def _token_freq(frames, batch=1_000_000, min_len=4):
+def _token_freq(frames, batch=750_000, min_len=4):
     parts = []
     for f in frames:
         for off in range(0, f.height, batch):
@@ -40,15 +40,20 @@ def _variants(df):
         pl.concat_str(["cty", "v"], separator="|").hash(seed=7).alias("vh")).drop("v")
 
 
-def build_corrections(frames, f_lo: int = 2, f_hi: int = 5, min_len: int = 4) -> pl.DataFrame:
+def _variants_batched(df, batch=3_000_000):
+    outs = [_variants(df.slice(o, batch)) for o in range(0, df.height, batch)]
+    return pl.concat(outs, rechunk=True) if len(outs) > 1 else outs[0]
+
+
+def build_corrections(frames, f_lo: int = 2, f_hi: int = 5, min_len: int = 4, batch: int = 750_000) -> pl.DataFrame:
     """Returns mapping DataFrame (cty, tok, fix)."""
-    freq = _token_freq(frames, min_len=min_len)
+    freq = _token_freq(frames, batch=batch, min_len=min_len)
     rare = freq.filter(pl.col("freq") <= f_lo).select("cty", "tok")
     good = freq.filter(pl.col("freq") >= f_hi).select("cty", pl.col("tok").alias("fix"), pl.col("freq").alias("ffreq"))
     if rare.height == 0 or good.height == 0:
         return pl.DataFrame(schema={"cty": pl.Utf8, "tok": pl.Utf8, "fix": pl.Utf8})
-    rv = _variants(rare).select("cty", "tok", "vh")
-    gv = _variants(good.rename({"fix": "tok"})).select(pl.col("tok").alias("fix"), "ffreq", "vh")
+    rv = _variants_batched(rare).select("cty", "tok", "vh")
+    gv = _variants_batched(good.rename({"fix": "tok"})).select(pl.col("tok").alias("fix"), "ffreq", "vh")
     m = rv.join(gv, on="vh").select("cty", "tok", "fix", "ffreq").unique()
     # pick the most frequent neighbour; deterministic tie-break on the string
     m = m.sort(["cty", "tok", "ffreq", "fix"], descending=[False, False, True, False]) \

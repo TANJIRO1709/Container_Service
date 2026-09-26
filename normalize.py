@@ -66,8 +66,8 @@ def clean_expr(col: str) -> pl.Expr:
     )
 
 
-def normalize(df: pl.DataFrame) -> pl.DataFrame:
-    out = df.with_row_index("idx").with_columns(
+def _normalize_block(df: pl.DataFrame, offset: int) -> pl.DataFrame:
+    out = df.with_row_index("idx", offset=offset).with_columns(
         pl.col("country").fill_null("").str.strip_chars().str.to_lowercase().alias("cty"),
         clean_expr("business_name").str.replace(r"^m s ", "").alias("_n"),   # "M/s Sharma" -> "sharma"
         clean_expr("business_address").alias("_a"),
@@ -114,3 +114,19 @@ def normalize(df: pl.DataFrame) -> pl.DataFrame:
         pl.col("_n").alias("name_raw"),
         "pc", "pc3", "hn", "dig_key", "legal", "initials", "first_tok",
     )
+
+
+def normalize(df: pl.DataFrame, batch: int = 750_000) -> pl.DataFrame:
+    """Normalize in row batches so peak memory stays bounded on very large frames.
+
+    Intermediate columns (token lists, expansions) are several times the size of the
+    input, so normalizing 10M+ records in one pass needs many GB. Batching caps that
+    at roughly `batch` rows' worth of intermediates; results are identical, because
+    every operation is row-local and `idx` keeps its global value via `offset`.
+    """
+    if df.height <= batch:
+        return _normalize_block(df, 0)
+    parts = []
+    for o in range(0, df.height, batch):
+        parts.append(_normalize_block(df.slice(o, batch), o))
+    return pl.concat(parts, rechunk=False)   # rechunk would transiently double the result
