@@ -247,8 +247,12 @@ class Corpus6:
             return None
         hits = q.filter("sel").select("idx", "key", "w", "ch").join(self.kt, on="key")
 
+        # Parallel float sums are order-dependent, so candidates tied at the top-K cutoff
+        # could swap between runs. Rounding makes ties exact; idx2 then breaks them.
+        R = lambda e: e.round(4)
+
         def top(ch, n, name):
-            t = hits.filter(pl.col("ch") == ch).group_by("idx", "idx2").agg(pl.col("w").sum().alias(name))
+            t = hits.filter(pl.col("ch") == ch).group_by("idx", "idx2").agg(R(pl.col("w").sum()).alias(name))
             return t.sort(["idx", name, "idx2"], descending=[False, True, False]) \
                     .filter(pl.int_range(pl.len()).over("idx") < n)
 
@@ -263,7 +267,7 @@ class Corpus6:
         full = c.select("idx", "idx2").join(q.select("idx", "key", "w", "typ"), on="idx") \
                 .join(tk, on=["idx2", "key"], how="semi")
         agg = full.group_by("idx", "idx2").agg(
-            pl.col("w").filter(pl.col("typ") <= 3).sum().alias("score"),
+            R(pl.col("w").filter(pl.col("typ") <= 3).sum()).alias("score"),
             pl.col("w").filter(pl.col("typ") <= 1).sum().alias("s_name"),
             pl.col("w").filter(pl.col("typ") == 2).sum().alias("s_addr"),
             (pl.col("typ") == 3).sum().cast(pl.Float32).alias("s_dig"),
@@ -274,8 +278,8 @@ class Corpus6:
             pl.col("w").filter(pl.col("typ") == 11).sum().alias("s_nga"),
         )
         c = c.join(agg, on=["idx", "idx2"], how="left").fill_null(0).with_columns(
-            (pl.col("s_phon") + pl.col("s_comp")).alias("_sb"),
-            (pl.col("s_ngn") + pl.col("s_nga")).alias("_sc"))
+            R(pl.col("s_phon") + pl.col("s_comp")).alias("_sb"),
+            R(pl.col("s_ngn") + pl.col("s_nga")).alias("_sc"))
         c = c.sort(["idx", "score", "s1score", "idx2"], descending=[False, True, True, False]) \
              .with_columns(pl.int_range(pl.len()).over("idx").alias("rank"))
         c = c.sort(["idx", "_sb", "s1b", "idx2"], descending=[False, True, True, False]) \
